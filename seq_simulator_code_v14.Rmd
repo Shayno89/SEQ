@@ -1,0 +1,906 @@
+---
+title: "SEQ Simulator v-14"
+authors: "Michael Sheridan & Shayne Burgess"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#0# Setting up file for Markdown
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#1# Adding required libraries, options & settings
+
+```{r}
+
+library(odbc)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(tidyverse)
+library(openxlsx)
+
+options(tz="Australia/Sydney")
+Sys.setenv(TZ="Australia/Sydney")
+
+# max.col, except it's min!
+min.col <- function(m, ...) max.col(-m, ...)
+```
+
+#2# Set ADJUST Function
+
+```{r}
+adjust <- function(subset, buffer_time, shift_length, max_total_drive_time, nodal_mode, shift_cap, TMD_depot, rhythmic_mode, roster_tmd, roster_sbd, roster_wsd, max_forward_drive_time, max_return_drive_time, fresh_crew_on_departure) 
+{
+  # create additional columns used in this function
+  subset$ShiftLength <- 0
+  subset$CumDuration <- 0
+  subset$TMD_TMD <- 0
+  subset$SBD_SBD <- 0
+  subset$WSD_WSD <- 0
+  subset$ShiftStartTMD <- 0
+  subset$ShiftStartSBD <- 0
+  subset$ShiftStartWSD <- 0
+  subset$DepotTimeTMD <- 0
+  subset$DepotTimeSBD <- 0
+  subset$DepotTimeWSD <- 0
+ 
+  
+  if (nrow(subset) > 1) # subset with 1 row can occur for stow event or last stop, can skip these
+  {
+    if (rhythmic_mode == TRUE)
+    {
+      shift_start_temp <- as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S") - (subset[1,"TMD"] * 60)
+      roster_calc_temp <- as.data.frame(as.POSIXct(as.Date(shift_start_temp)) - hour(as.POSIXct(as.Date(shift_start_temp))) * 3600 + roster_tmd * 60)
+      names(roster_calc_temp) <- c("roster")
+      shift_start_tmd <- max(roster_calc_temp[roster_calc_temp$roster < shift_start_temp, ])
+      depot_time_tmd <- as.integer(shift_start_temp - shift_start_tmd)
+      
+      shift_start_temp <- as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S") - (subset[1,"SBD"] * 60)
+      roster_calc_temp <- as.data.frame(as.POSIXct(as.Date(shift_start_temp)) - hour(as.POSIXct(as.Date(shift_start_temp))) * 3600 + roster_sbd * 60)
+      names(roster_calc_temp) <- c("roster")
+      shift_start_sbd <- max(roster_calc_temp[roster_calc_temp$roster < shift_start_temp, ])
+      depot_time_sbd <- as.integer(shift_start_temp - shift_start_sbd)
+      
+      shift_start_temp <- as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S") - (subset[1,"WSD"] * 60)
+      roster_calc_temp <- as.data.frame(as.POSIXct(as.Date(shift_start_temp)) - hour(as.POSIXct(as.Date(shift_start_temp))) * 3600 + roster_wsd * 60)
+      names(roster_calc_temp) <- c("roster")
+      shift_start_wsd <- max(roster_calc_temp[roster_calc_temp$roster < shift_start_temp, ])
+      depot_time_wsd <- as.integer(shift_start_temp - shift_start_wsd)
+  
+      subset$ShiftStartTMD <- shift_start_tmd
+      subset$ShiftStartSBD <- shift_start_sbd
+      subset$ShiftStartWSD <- shift_start_wsd
+      
+      subset$DepotTimeTMD <- depot_time_tmd
+      subset$DepotTimeSBD <- depot_time_sbd
+      subset$DepotTimeWSD <- depot_time_wsd 
+              
+      for (row in 2:nrow(subset))
+      {
+        subset[row, "CumDuration"] <- subset[row,"SectionDuration"] + subset[row - 1,"CumDuration"]
+        
+        if (!(is.na(subset[row,"LocationPriority"])))
+        {
+          subset[row, "SBD_SBD"] <- subset[1, "SBD"] + subset[row, "CumDuration"] + subset[row, "SBD"] + buffer_time + depot_time_sbd
+          subset[row, "WSD_WSD"] <- subset[1, "WSD"] + subset[row, "CumDuration"] + subset[row, "WSD"] + buffer_time + depot_time_wsd
+          subset[row, "TMD_TMD"] <- subset[1, "TMD"] + subset[row, "CumDuration"] + subset[row, "TMD"] + buffer_time + depot_time_tmd
+        }
+      }
+    }else{
+      
+      shift_start_tmd <- as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S") - (subset[1,"TMD"] * 60)
+      depot_time_tmd <- 0
+      
+      shift_start_sbd <- as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S") - (subset[1,"SBD"] * 60)
+      depot_time_sbd <- 0
+      
+      shift_start_wsd <- as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S") - (subset[1,"WSD"] * 60)
+      depot_time_wsd <- 0
+      
+      subset$ShiftStartTMD <- shift_start_tmd
+      subset$ShiftStartSBD <- shift_start_sbd
+      subset$ShiftStartWSD <- shift_start_wsd
+      
+      subset$DepotTimeTMD <- depot_time_tmd
+      subset$DepotTimeSBD <- depot_time_sbd
+      subset$DepotTimeWSD <- depot_time_wsd 
+      
+      for (row in 2:nrow(subset))
+      {
+        subset[row, "CumDuration"] <- subset[row,"SectionDuration"] + subset[row - 1,"CumDuration"]
+        
+        if (!(is.na(subset[row,"LocationPriority"])))
+        {
+          subset[row, "SBD_SBD"] <- subset[1, "SBD"] + subset[row, "CumDuration"] + subset[row, "SBD"] + buffer_time
+          subset[row, "WSD_WSD"] <- subset[1, "WSD"] + subset[row, "CumDuration"] + subset[row, "WSD"] + buffer_time
+          subset[row, "TMD_TMD"] <- subset[1, "TMD"] + subset[row, "CumDuration"] + subset[row, "TMD"] + buffer_time
+        }
+      }
+    }
+  }
+
+  # Create data frame for use in identifying the optimum change location
+  optimum <- data.frame(Row=integer(), 
+                        CumDuration=double(), 
+                        Option=character(), 
+                        ExceedCap=logical(), 
+                        ExceedDrive=logical(), 
+                        Footplate=double(), 
+                        ShortestDrive=double(), 
+                        ShiftLength=double(),
+                        OverShiftLength=double(),
+                        UnderShiftLength=double(),
+                        LocationPriority=logical(),
+                        ObjectiveFunction=double(),
+                        ExceedNodeShiftLimit=logical(),
+                        stringsAsFactors=FALSE)
+  
+  # process each row to identify best depot choice for each location 
+  for (row in 2:nrow(subset))
+  {
+    # identify the depot name with the shortest total drive time
+    option <- names(subset)[32+min.col(as.matrix(subset[row,c("TMD_TMD","SBD_SBD","WSD_WSD")]), ties.method = "first")]
+    
+    if (option == "TMD_TMD"){
+      forward_drive <- subset[1,"TMD"] 
+      return_drive <- subset[row, "TMD"]
+      total_drive <- forward_drive + return_drive
+    } else if (option == "SBD_SBD") {
+      forward_drive <- subset[1,"SBD"] 
+      return_drive <- subset[row, "SBD"]
+      total_drive <- forward_drive + return_drive
+    } else if (option == "WSD_WSD") {
+      forward_drive <- subset[1,"WSD"] 
+      return_drive <- subset[row, "WSD"]
+      total_drive <- forward_drive + return_drive
+    } else {
+      forward_drive <- 0
+      return_drive <- 0
+      total_drive <- 0
+    }
+    
+    shortest_shift <- subset[row,names(subset)[32+min.col(as.matrix(subset[row,c("TMD_TMD","SBD_SBD","WSD_WSD")]), ties.method = "first")]]
+    
+    # add row to optimum data frame for this location
+    optimum[nrow(optimum) + 1,] = list(row, #Row
+                                       subset[row,"CumDuration"], #CumDuration
+                                       option, #Option
+                                       ifelse(is.na(subset[row,"LocationPriority"]), FALSE, shortest_shift > shift_cap), #ExceedCap
+                                       ifelse(is.na(subset[row,"LocationPriority"]), FALSE, forward_drive > max_forward_drive_time | return_drive > max_return_drive_time | total_drive > max_total_drive_time), #ExceedDrive
+                                       ifelse(is.na(subset[row,"LocationPriority"]), 0, subset[row,"CumDuration"]), #Footplate
+                                       ifelse(is.na(subset[row,"LocationPriority"]), 0, total_drive), #ShortestDrive
+                                       ifelse(is.na(subset[row,"LocationPriority"]), 0, shortest_shift), #ShiftLength
+                                       ifelse(is.na(subset[row,"LocationPriority"]), 0, max(shortest_shift - shift_length, 0)), #OverShiftLength
+                                       ifelse(is.na(subset[row,"LocationPriority"]), 0, max(shift_length - shortest_shift, 0)), #UnderShiftLength
+                                       ifelse(is.na(subset[row,"LocationPriority"]), 0, subset[row, "LocationPriority"]), #LocationPriority
+                                       0, #ObjectiveFunction - to be calculated later
+                                       FALSE #ExceedNodeShiftLimit - to be calculated later
+    )
+    
+  }
+  
+  # calculate objective function value for each row
+  for (row in 1:nrow(optimum)) 
+  {
+    optimum[row,'ObjectiveFunction'] <- 1 * optimum[row,'OverShiftLength'] + 2 * optimum[row,'UnderShiftLength'] + 1 * optimum[row,'ShortestDrive']
+  }
+  
+  # NA rows that exceed caps 
+  optimum[optimum$ExceedCap == TRUE | optimum$ExceedDrive == TRUE | optimum$LocationPriority == 0,"ShiftLength"] <- NA
+  optimum[optimum$ExceedCap == TRUE | optimum$ExceedDrive == TRUE | optimum$LocationPriority == 0,"ObjectiveFunction"] <- NA
+  optimum[optimum$ExceedCap == TRUE | optimum$ExceedDrive == TRUE, "LocationPriority"] <- NA
+  
+  if (length(na.omit(optimum$ShiftLength)) == 0)
+  {
+    max_row <- 1 # unable to find a feasible solution
+  }
+  else
+  {
+    # Select row with minimum objective function
+    max_row <- which.min(optimum$ObjectiveFunction) + 1
+    
+    # Nodal mode is handled here
+    if (nodal_mode == TRUE)
+    {
+      for (row in 1:nrow(optimum)) 
+      {
+        # mark if a location in subset qualifies for a nodal stop (shift length over threshold a that point)
+        optimum[row,'ExceedNodeShiftLimit'] <- ifelse(optimum[row, "LocationPriority"] == 3, as.integer(optimum[row, "ShiftLength"]) > as.integer(subset[optimum[row, "Row"], "NodeShiftLengthThreshold"]), FALSE)
+      }
+      
+      # if there is an available nodal stop in subset...
+      if (length(which(optimum$LocationPriority == 3 & optimum$ExceedNodeShiftLimit == TRUE)) > 0) 
+      {
+        # force the change if it occurs before the previously identified optimal crew change
+        max_row <- min(min(which(optimum$LocationPriority == 3 & optimum$ExceedNodeShiftLimit == TRUE)) + 1, max_row)
+      }
+    }
+    
+    # fresh_crew_on_departure mode is handled here
+    if (fresh_crew_on_departure == TRUE)
+    {
+      # if there is a fresh crew designated location in subset...
+      if (length(which(optimum$LocationPriority == 4)) > 0) 
+      {
+        # force the change if it occurs before the previously identified optimal crew change
+        max_row <- min(min(which(optimum$LocationPriority == 4)) + 1, max_row)
+      }
+    }
+    
+    # populate additional columns for returning from function
+    subset[max_row,"ShiftLength"] <- optimum[max_row - 1, "ShiftLength"]
+    subset[max_row,"BestOption"] <- optimum[max_row - 1, "Option"]
+    subset[max_row, "CrewChange"] <- TRUE
+    subset[max_row, "ShiftStart"] <- subset[max_row,names(subset)[35+min.col(as.matrix(subset[max_row,c("TMD_TMD","SBD_SBD","WSD_WSD")]), ties.method = "first")]]
+  }
+  
+  return (subset[max_row, ])
+}
+  
+```
+
+#3# Set MAKE DATA Function
+
+```{r}
+# make the main working data set. This needs to be done for each model before it is run, based on input parameters
+make_data <- function(scenario_type, start_date, end_date, TMD_depot)
+{
+
+  fleet_movement_data <- readWorkbook(xlsxFile = "simulator_input_data_fleet_movement.xlsx", sheet = 1, cols = 1:10)
+  cycle_data <- readWorkbook(xlsxFile = "simulator_input_data_cycle_data.xlsx", sheet = 1, cols = 1:6)
+  
+  fleet_movement_data <- left_join(fleet_movement_data, cycle_data, by = c('CycleID'))
+  
+  #total_hours <- round(as.numeric(difftime(paste(end_date,"23:59:59"), paste(start_date,"00:00:00"), units="hour")))
+  fleet_movement_data$LocationDateTime <- convertToDateTime(fleet_movement_data$LocationDateTime, tz="Australia/Sydney")
+  
+  # Filter fleet movement data for input date range - can select CoalHaul only, remove confirmed double-pingers, filter out particular mine-markets.  
+  cycle_id_summary <- fleet_movement_data %>% 
+    filter(LocationDateTime >= paste(start_date,"00:00:00") & LocationDateTime <= paste(end_date, "23:59:59") & RouteType == 'CoalHaul' & is.na(ConfDP) & mine_market != "Ebenezer-Export") %>%
+    #filter(LocationDateTime >= paste(start_date,"00:00:00") & LocationDateTime <= paste(end_date, "23:59:59") & RouteType == 'CoalHaul' & is.na(ConfDP)) %>% 
+    #filter(LocationDateTime >= paste(start_date,"00:00:00") & LocationDateTime <= paste(end_date, "23:59:59") & is.na(ConfDP)) %>% 
+    group_by(CycleID) %>% distinct(CycleID)
+  
+  fleet_movement_data <- fleet_movement_data %>% filter(CycleID %in% cycle_id_summary$CycleID)
+  
+  # Import other input data
+  location_data       <- readWorkbook(xlsxFile = "simulator_input_data_location_data.xlsx", sheet = 1, cols = 1:4)
+  drive_times         <- readWorkbook(xlsxFile = "simulator_input_data_drive_times.xlsx", sheet = 1, cols = 1:7)
+  path_medians        <- readWorkbook(xlsxFile = "simulator_input_data_path_medians.xlsx", sheet = 1, cols = 1:4)
+  main_data <- left_join(fleet_movement_data, location_data, by = c('LocationCode', 'Direction'))
+  #main_data <- main_data %>% filter(!is.na(LocationPriority)) # Idea was that only priority locations were of interest. But keeping all data points so unique route groups aren't missed 
+  main_data <- left_join(main_data, drive_times, by = c('LocationCode'))
+  
+  main_data <- left_join(main_data, path_medians, by = c('TripPath'))
+  main_data$SectionDuration <- NA # additional column to hold the section duration for the selected scenario
+  main_data$RowNumber <- NA # additional column to hold the row number for each LocoID subset - used for subsetting to pass to adjust function
+  main_data$BufferColumn <- NA # Buffer to ensure column count remains constant regardless of nodal_mode true/false (deleted on true and replaced with NodeShiftLengthThreshold)
+  
+  locos <- unique(main_data$LocoID)
+  
+  if (scenario_type != 'Actual')
+  {
+    # re-adjust timings to match the scenario-type. By default they are "actual" timings based on "actual" duration, but we need to work off
+    # the medians or whatever the user specified so that will cause the actual timings to change, and we adjust for that
+    for (loco in locos)
+    {
+      workingset <- main_data[main_data$LocoID == loco,]
+      workingset[1, 'SectionDuration'] <- workingset[1, scenario_type]
+      workingset[1, 'RowNumber'] <- 1
+      
+      if (nrow(workingset) > 1)
+      {
+        for (row in 2:nrow(workingset)) # first row LocationDateTime is fine, the rest we need to adjust off the first row start time
+        {
+          workingset[row, 'SectionDuration'] <- workingset[row, scenario_type]
+          workingset[row, "LocationDateTime"] <- as.POSIXct(workingset[row-1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S", tz = "Australia/Sydney") + (workingset[row, "SectionDuration"] * 60)
+          workingset[row, 'RowNumber'] <- workingset[row-1, 'RowNumber'] + 1
+        }
+        main_data[main_data$LocoID == loco,] <- workingset
+      }
+    }
+  } else
+  {
+    # for scenario == 'Actual' recalculate section duration (accounting for filtered rows)
+    for (loco in locos)
+    {
+      workingset <- main_data[main_data$LocoID == loco,]
+      workingset[1, 'SectionDuration'] <- 0
+      workingset[1, 'RowNumber'] <- 1
+      
+      if (nrow(workingset) > 1)
+      {
+        for (row in 2:nrow(workingset)) 
+        {
+          workingset[row, 'SectionDuration'] <- difftime(workingset[row, "LocationDateTime"], workingset[row-1, "LocationDateTime"], units = "mins")
+          workingset[row, 'RowNumber'] <- workingset[row-1, 'RowNumber'] + 1
+          #print(paste(loco, ' row ', workingset[row, 'RowNumber']))
+        }
+        main_data[main_data$LocoID == loco,] <- workingset
+      }
+    }
+  }
+  
+  # Apply distinct location priority to designated nodes if using nodal_mode
+  if (nodal_mode == TRUE)
+  {
+    main_data <- left_join(main_data, nodes, by = c('LocationCode', 'Direction'))
+    main_data[!is.na(main_data$NodePriority), 'LocationPriority'] <- main_data[!is.na(main_data$NodePriority), 'NodePriority']
+    main_data$NodePriority <- NULL
+    main_data$BufferColumn <- NULL
+  }
+  
+  # Apply distinct location priority to designated locations if forcing fresh_crew_on_departure
+  if (fresh_crew_on_departure == TRUE)
+  {
+ main_data[main_data$TripPath == 'L-L-CMD-CMD-01000019', 'LocationPriority'] <- 4
+ main_data[main_data$TripPath == 'Y-E-YLE-RSW-05013748', 'LocationPriority'] <- 4
+  }
+  
+  main_data[is.na(main_data$LocationPriority), "LocationPriority"] <- NA
+  main_data$TMD <- main_data[, TMD_depot]
+  
+  return(main_data)
+}
+
+```
+
+#4# Set SIMULATE Function
+
+```{r}
+# the simulator
+simulate <- function(start_date, end_date, shift_cap, shift_length, max_total_drive_time, buffer_time, scenario_type, nodes, roster_tmd, roster_sbn, roster_wsd, nodal_mode, TMD_depot, rhythmic_mode, max_forward_drive_time, max_return_drive_time, fresh_crew_on_departure)
+{
+  main_data <- make_data(scenario_type, start_date, end_date, TMD_depot) # Create working dataset
+  locos <- unique(main_data$LocoID) # Create list of unique loco ids to loop through
+  crew_index <- 1 # initialise crew index counter
+  
+  # set output_summary dataframe
+  V_Crew_Activity_Summary <- data.frame(crew_index = integer(), 
+                                        shift_start_date = as.POSIXct(character()),
+                                        shift_start = as.POSIXct(character()),
+                                        shift_end = as.POSIXct(character()),
+                                        actual_shift_length = double(), 
+                                        forward_drive_time = double(),
+                                        return_drive_time = double(),
+                                        total_drive_time = double(),
+                                        total_footplate_time = double(),
+                                        depot = character(),
+                                        start_crew_change_location = character(),
+                                        end_crew_change_location = character(),
+                                        loco_id = integer(),
+                                        footplate_start = as.POSIXct(character()),
+                                        footplate_end = as.POSIXct(character()),
+                                        start_crew_change_location_priority = integer(),
+                                        end_crew_change_location_priority = integer(),
+                                        cycle_id_start = integer(),
+                                        route_start = character(),
+                                        cycle_id_end = integer(),
+                                        route_end = character(),
+                                        row_count = integer(),
+                                        footplate_distance = double(),
+                                        start_crew_change_location_direction = character(),
+                                        end_crew_change_location_direction = character(),
+                                        start_crew_change_location_primary_key = integer(),
+                                        end_crew_change_location_primary_key = integer(),
+                                        start_route_end = as.POSIXct(character()),
+                                        stringsAsFactors=FALSE) #may need to remove this if having issues with rbind/as.POSIXct
+  
+  # set route group qualification dataframe
+  T_route_groups <- data.frame(crew_index = integer(),
+                               route_group_id = integer(),
+                               stringsAsFactors=FALSE)
+  
+  # set warning/error log dataframe
+  T_Warning_Log <- data.frame(loco_id = integer(),
+                              cycle_id = integer(),
+                              fleet_movement_primary_key = integer(),
+                              location_date_time = as.POSIXct(character()),
+                              duration = double(),
+                              location = character(),
+                              type = character(), 
+                              stringsAsFactors=FALSE)
+  
+  for (loco in locos)
+  {
+    locosubset <- main_data[main_data$LocoID == loco,] # we work on a loco by loco basis
+    
+    # Extract subset of rows to search for next change location
+    RowStart <- min(locosubset$RowNumber)
+    RowEnd <- min(RowStart+75, max(locosubset$RowNumber))
+    RowStart <- as.integer(RowStart)
+    RowEnd <- as.integer(RowEnd)
+    subset <- locosubset[locosubset$RowNumber >= RowStart & locosubset$RowNumber <= RowEnd, ]
+    
+   #subset_length <- RowEnd - RowStart
+    subset_sufficient <- RowEnd - RowStart > 1
+    if (is.na(subset_sufficient)){ subset_sufficient <- FALSE}
+    
+    while (subset_sufficient)
+    {
+      #print(paste(subset[1, 'CycleID'], " - ", subset[1, 'RowNumber']))
+      
+      change_point <- adjust(subset, buffer_time, shift_length, max_total_drive_time, nodal_mode, shift_cap, TMD_depot, rhythmic_mode, roster_tmd, roster_sbd, roster_wsd, max_forward_drive_time, max_return_drive_time, fresh_crew_on_departure)
+      
+      if (change_point$RowNumber == RowStart | is.na(change_point$LocationPriority))
+      {
+        #print(paste('WARNING: CycleID ', change_point$CycleID , ' row ', RowStart, ' does not have a solution, aborting this row'))
+        
+        T_Warning_Log[nrow(T_Warning_Log) + 1, ] =             
+          list(  loco_id = change_point$LocoID,
+                 cycle_id = change_point$CycleID,
+                 fleet_movement_primary_key = change_point$PrimaryKey,
+                 location_date_time = change_point$LocationDateTime,
+                 duration = change_point$SectionDuration,
+                 location = change_point$LocationCode,
+                 type = 'WARNING: no solution found, row aborted'
+              )
+        
+        RowStart <- RowStart + 1
+        RowEnd <- min(as.integer(RowStart+75), as.integer(max(locosubset$RowNumber)))
+        RowStart <- as.integer(RowStart)
+        RowEnd <- as.integer(RowEnd)
+        subset_sufficient <- RowEnd - RowStart > 1
+        subset <- locosubset[locosubset$RowNumber >= RowStart & locosubset$RowNumber <= RowEnd, ]
+      }
+      else # found a suitable change location, so add row to summary data
+      {
+        start_depot <- substr(change_point[,"BestOption"],1,3)
+        drive_initial <- subset[1, start_depot]
+        drive_return <- change_point[1, start_depot]
+        
+        V_Crew_Activity_Summary[nrow(V_Crew_Activity_Summary) + 1, ] =             
+                                              list(  crew_index = crew_index, 
+                                                     #shift_start_date = as.Date(as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S", tz = "Australia/Sydney") - (drive_initial * 60), tz = "Australia/Sydney"),
+                                                     shift_start_date = as.Date(change_point$ShiftStart, format="%Y-%M-%D %H:%M:%S", tz = "Australia/Sydney"),
+                                                     #shift_start = as.POSIXct(subset[1, "LocationDateTime"], format="%Y-%M-%D %H:%M:%S") - (drive_initial * 60),
+                                                     shift_start = change_point$ShiftStart,
+                                                     shift_end = as.POSIXct(change_point$LocationDateTime, format="%Y-%M-%D %H:%M:%S") + (drive_return * 60),
+                                                     actual_shift_length = change_point$ShiftLength / 60, 
+                                                     forward_drive_time = drive_initial / 60,
+                                                     return_drive_time = drive_return / 60,
+                                                     total_drive_time = (drive_initial + drive_return) / 60,
+                                                     total_footplate_time = change_point$CumDuration / 60,
+                                                     depot = start_depot,
+                                                     start_crew_change_location = subset[1, "LocationCode"],
+                                                     end_crew_change_location = change_point$LocationCode,
+                                                     loco_id = change_point$LocoID,
+                                                     footplate_start = subset[1, "LocationDateTime"],
+                                                     footplate_end = change_point$LocationDateTime,
+                                                     start_crew_change_location_priority = subset[1, "LocationPriority"],
+                                                     end_crew_change_location_priority = change_point$LocationPriority,
+                                                     cycle_id_start = subset[1, "CycleID"],
+                                                     route_start = subset[1, "FinalPath"],
+                                                     cycle_id_end = change_point$CycleID,
+                                                     route_end = change_point$FinalPath,
+                                                     row_count = change_point$RowNumber - subset[1, "RowNumber"],
+                                                     footplate_distance = sum(subset[subset$RowNumber <= change_point$RowNumber, "SectionDistance"]),
+                                                     start_crew_change_location_direction = subset[1, "Direction"],
+                                                     end_crew_change_location_direction = change_point$Direction,
+                                                     start_crew_change_location_fleet_movement_primary_key = subset[1, "PrimaryKey"],
+                                                     end_crew_change_location_fleet_movement_primary_key = change_point$PrimaryKey,
+                                                     #start_route_end = as.POSIXct(max(subset[subset$CycleID <= subset[1, "CycleID"], "LocationDateTime"]), format="%Y-%M-%D %H:%M:%S")
+                                                     start_route_end = max(subset[subset$CycleID <= subset[1, "CycleID"] & subset$RowNumber <= change_point$RowNumber, "LocationDateTime"])
+                                                  )
+        
+        # Record unique route groups that crew covered
+        T_route_groups = T_route_groups %>% add_row(crew_index = crew_index, route_group_id = unique(subset[subset$RowNumber <= change_point$RowNumber, "RouteGroupID"]))             
+        
+        crew_index <- crew_index + 1 # increment the crew index
+        
+        RowStart <- change_point$RowNumber
+        RowEnd <- min(RowStart+75, max(locosubset$RowNumber))
+        RowStart <- as.integer(RowStart)
+        RowEnd <- as.integer(RowEnd)
+        subset_sufficient <- RowEnd - RowStart > 1
+        
+        subset <- locosubset[locosubset$RowNumber >= RowStart & locosubset$RowNumber <= RowEnd, ]
+        
+        # debug:
+        #x <- RowStart < max(locosubset$RowNumber)
+        #if (loco == 6022){ print(paste(subset[1, 'CycleID'], " ", subset[1, 'RowNumber'], "/", RowStart, " - ", max(subset$RowNumber), "/", RowEnd, "/", max(locosubset$RowNumber), " - ", x))}
+      }
+    }
+  }
+  
+  if(filter_short_shifts == TRUE)
+  {
+    # filters shifts that only consist of one or two sections. Alternatively could filter these as part of the output analysis 
+    V_Crew_Activity_Summary <- V_Crew_Activity_Summary %>% filter(row_count > 2)
+  }
+  
+  # R does not support returning multiple results so this class below sorts that out
+  setClass("paramReturns", representation(summarydata = "list", inputdata = "list", warninglog = "list", routegroups = "list"))
+  RparamReturns <- function(df1, df2, df3, df4){
+    output <- new("paramReturns", summarydata = df1, inputdata = df2, warninglog = df3, routegroups = df4)
+    return(output)
+  }
+  return (RparamReturns(V_Crew_Activity_Summary, main_data, T_Warning_Log, T_route_groups))
+  
+}
+```
+
+#5# Set SUMMARY STATS Function
+
+```{r}
+# function to calculate summary stats
+summary_stats_calculation <- function (dataset)
+{
+  daily_summary <- dataset %>% group_by(shift_start_date) %>% summarise(count = n())
+  daily_depot_summary <- dataset %>% group_by(shift_start_date, depot) %>% summarise(count = n())
+  daily_depot_summary_tmd <- daily_depot_summary %>% filter(depot == 'TMD')
+  daily_depot_summary_sbd <- daily_depot_summary %>% filter(depot == 'SBD')
+  daily_depot_summary_wsd <- daily_depot_summary %>% filter(depot == 'WSD')
+  
+  crew_pairs_daily_avg_total <- mean(daily_summary$count)
+  crew_pairs_daily_avg_TMD <- mean(daily_depot_summary_tmd$count)
+  crew_pairs_daily_avg_SBD <- mean(daily_depot_summary_sbd$count)
+  crew_pairs_daily_avg_WSD <- mean(daily_depot_summary_wsd$count)
+  
+  footplate_duration_avg_total <- mean(dataset$total_footplate_time)
+  footplate_duration_avg_TMD <- mean(dataset[dataset$depot == "TMD", 'total_footplate_time'])
+  footplate_duration_avg_SBD <- mean(dataset[dataset$depot == "SBD", 'total_footplate_time'])
+  footplate_duration_avg_WSD <- mean(dataset[dataset$depot == "WSD", 'total_footplate_time'])
+  
+  drive_initial_avg_total <- mean(dataset$forward_drive_time)
+  drive_initial_avg_TMD <- mean(dataset[dataset$depot == "TMD", 'forward_drive_time'])
+  drive_initial_avg_SBD <- mean(dataset[dataset$depot == "SBD", 'forward_drive_time'])
+  drive_initial_avg_WSD <- mean(dataset[dataset$depot == "WSD", 'forward_drive_time'])
+  
+  drive_return_avg_total <- mean(dataset$return_drive_time)
+  drive_return_avg_TMD <- mean(dataset[dataset$depot == "TMD", 'return_drive_time'])
+  drive_return_avg_SBD <- mean(dataset[dataset$depot == "SBD", 'return_drive_time'])
+  drive_return_avg_WSD <- mean(dataset[dataset$depot == "WSD", 'return_drive_time'])
+  
+  drive_total_avg_total <- mean(dataset$total_drive_time)
+  drive_total_avg_TMD <- mean(dataset[dataset$depot == "TMD", 'total_drive_time'])
+  drive_total_avg_SBD <- mean(dataset[dataset$depot == "SBD", 'total_drive_time'])
+  drive_total_avg_WSD <- mean(dataset[dataset$depot == "WSD", 'total_drive_time'])
+  
+  total_shift_duration_avg_total <- mean(dataset$actual_shift_length)
+  total_shift_duration_avg_TMD <- mean(dataset[dataset$depot == "TMD", 'actual_shift_length'])
+  total_shift_duration_avg_SBD <- mean(dataset[dataset$depot == "SBD", 'actual_shift_length'])
+  total_shift_duration_avg_WSD <- mean(dataset[dataset$depot == "WSD", 'actual_shift_length'])
+  
+  summary <- as.data.frame(cbind(crew_pairs_daily_avg_total,
+                                 crew_pairs_daily_avg_TMD,
+                                 crew_pairs_daily_avg_SBD,
+                                 crew_pairs_daily_avg_WSD,
+                                 footplate_duration_avg_total,
+                                 footplate_duration_avg_TMD,
+                                 footplate_duration_avg_SBD,
+                                 footplate_duration_avg_WSD,
+                                 drive_initial_avg_total,
+                                 drive_initial_avg_TMD,
+                                 drive_initial_avg_SBD,
+                                 drive_initial_avg_WSD,
+                                 drive_return_avg_total,
+                                 drive_return_avg_TMD,
+                                 drive_return_avg_SBD,
+                                 drive_return_avg_WSD,
+                                 drive_total_avg_total,
+                                 drive_total_avg_TMD,
+                                 drive_total_avg_SBD,
+                                 drive_total_avg_WSD,
+                                 total_shift_duration_avg_total,
+                                 total_shift_duration_avg_TMD,
+                                 total_shift_duration_avg_SBD,
+                                 total_shift_duration_avg_WSD))
+  names(summary) <- c("crew_pairs_daily_avg_total",
+                      "crew_pairs_daily_avg_TMD",
+                      "crew_pairs_daily_avg_SBD",
+                      "crew_pairs_daily_avg_WSD",
+                      "footplate_duration_avg_total",
+                      "footplate_duration_avg_TMD",
+                      "footplate_duration_avg_SBD",
+                      "footplate_duration_avg_WSD",
+                      "drive_initial_avg_total",
+                      "drive_initial_avg_TMD",
+                      "drive_initial_avg_SBD",
+                      "drive_initial_avg_WSD",
+                      "drive_return_avg_total",
+                      "drive_return_avg_TMD",
+                      "drive_return_avg_SBD",
+                      "drive_return_avg_WSD",
+                      "drive_total_avg_total",
+                      "drive_total_avg_TMD",
+                      "drive_total_avg_SBD",
+                      "drive_total_avg_WSD",
+                      "total_shift_duration_avg_total",
+                      "total_shift_duration_avg_TMD",
+                      "total_shift_duration_avg_SBD",
+                      "total_shift_duration_avg_WSD")
+  
+  return(summary)
+}
+```
+
+#6# Set FILTERED SUMMARY STATS Function
+
+```{r}
+filtered_summary_stats_calculation <- function (dataset)
+{
+  # Filter "short shifts"
+  dataset <- dataset %>% filter(row_count > 2)
+  
+  # Filter bottom 5% of shift lengths
+  lowerbound <- quantile(dataset$actual_shift_length, probs=c(.05), na.rm = FALSE)
+  filtered_dataset <- dataset %>% filter(actual_shift_length > lowerbound)
+  
+  # Filter bottom 5% of daily crew pairs (should capture ARTC close downs etc)
+  daily_summary <- filtered_dataset %>% group_by(shift_start_date) %>% summarise(count = n())
+  lowerbound <- quantile(daily_summary$count, probs=c(.05), na.rm = FALSE)
+  daily_summary <- daily_summary %>% filter(count > lowerbound)
+  
+  daily_depot_summary <- filtered_dataset %>% group_by(shift_start_date, depot) %>% summarise(count = n())
+  
+  daily_depot_summary_tmd <- daily_depot_summary %>% filter(depot == 'TMD')
+  lowerbound <- quantile(daily_depot_summary_tmd$count, probs=c(.05), na.rm = FALSE)
+  daily_depot_summary_tmd <- daily_depot_summary_tmd %>% filter(count > lowerbound)
+  
+  daily_depot_summary_sbd <- daily_depot_summary %>% filter(depot == 'SBD')
+  lowerbound <- quantile(daily_depot_summary_sbd$count, probs=c(.05), na.rm = FALSE)
+  daily_depot_summary_sbd <- daily_depot_summary_sbd %>% filter(count > lowerbound)
+  
+  daily_depot_summary_wsd <- daily_depot_summary %>% filter(depot == 'WSD')
+  lowerbound <- quantile(daily_depot_summary_wsd$count, probs=c(.05), na.rm = FALSE)
+  daily_depot_summary_wsd <- daily_depot_summary_wsd %>% filter(count > lowerbound)
+
+  crew_pairs_daily_avg_total <- mean(daily_summary$count)
+  crew_pairs_daily_avg_TMD <- mean(daily_depot_summary_tmd$count)
+  crew_pairs_daily_avg_SBD <- mean(daily_depot_summary_sbd$count)
+  crew_pairs_daily_avg_WSD <- mean(daily_depot_summary_wsd$count)
+  
+  footplate_duration_avg_total <- mean(filtered_dataset$total_footplate_time)
+  footplate_duration_avg_TMD <- mean(filtered_dataset[filtered_dataset$depot == "TMD", 'total_footplate_time'])
+  footplate_duration_avg_SBD <- mean(filtered_dataset[filtered_dataset$depot == "SBD", 'total_footplate_time'])
+  footplate_duration_avg_WSD <- mean(filtered_dataset[filtered_dataset$depot == "WSD", 'total_footplate_time'])
+  
+  drive_initial_avg_total <- mean(filtered_dataset$forward_drive_time)
+  drive_initial_avg_TMD <- mean(filtered_dataset[filtered_dataset$depot == "TMD", 'forward_drive_time'])
+  drive_initial_avg_SBD <- mean(filtered_dataset[filtered_dataset$depot == "SBD", 'forward_drive_time'])
+  drive_initial_avg_WSD <- mean(filtered_dataset[filtered_dataset$depot == "WSD", 'forward_drive_time'])
+  
+  drive_return_avg_total <- mean(filtered_dataset$return_drive_time)
+  drive_return_avg_TMD <- mean(filtered_dataset[filtered_dataset$depot == "TMD", 'return_drive_time'])
+  drive_return_avg_SBD <- mean(filtered_dataset[filtered_dataset$depot == "SBD", 'return_drive_time'])
+  drive_return_avg_WSD <- mean(filtered_dataset[filtered_dataset$depot == "WSD", 'return_drive_time'])
+  
+  drive_total_avg_total <- mean(filtered_dataset$total_drive_time)
+  drive_total_avg_TMD <- mean(filtered_dataset[filtered_dataset$depot == "TMD", 'total_drive_time'])
+  drive_total_avg_SBD <- mean(filtered_dataset[filtered_dataset$depot == "SBD", 'total_drive_time'])
+  drive_total_avg_WSD <- mean(filtered_dataset[filtered_dataset$depot == "WSD", 'total_drive_time'])
+  
+  total_shift_duration_avg_total <- mean(filtered_dataset$actual_shift_length)
+  total_shift_duration_avg_TMD <- mean(filtered_dataset[filtered_dataset$depot == "TMD", 'actual_shift_length'])
+  total_shift_duration_avg_SBD <- mean(filtered_dataset[filtered_dataset$depot == "SBD", 'actual_shift_length'])
+  total_shift_duration_avg_WSD <- mean(filtered_dataset[filtered_dataset$depot == "WSD", 'actual_shift_length'])
+  
+  summary <- as.data.frame(cbind(crew_pairs_daily_avg_total,
+                                 crew_pairs_daily_avg_TMD,
+                                 crew_pairs_daily_avg_SBD,
+                                 crew_pairs_daily_avg_WSD,
+                                 footplate_duration_avg_total,
+                                 footplate_duration_avg_TMD,
+                                 footplate_duration_avg_SBD,
+                                 footplate_duration_avg_WSD,
+                                 drive_initial_avg_total,
+                                 drive_initial_avg_TMD,
+                                 drive_initial_avg_SBD,
+                                 drive_initial_avg_WSD,
+                                 drive_return_avg_total,
+                                 drive_return_avg_TMD,
+                                 drive_return_avg_SBD,
+                                 drive_return_avg_WSD,
+                                 drive_total_avg_total,
+                                 drive_total_avg_TMD,
+                                 drive_total_avg_SBD,
+                                 drive_total_avg_WSD,
+                                 total_shift_duration_avg_total,
+                                 total_shift_duration_avg_TMD,
+                                 total_shift_duration_avg_SBD,
+                                 total_shift_duration_avg_WSD))
+  names(summary) <- c("crew_pairs_daily_avg_total",
+                      "crew_pairs_daily_avg_TMD",
+                      "crew_pairs_daily_avg_SBD",
+                      "crew_pairs_daily_avg_WSD",
+                      "footplate_duration_avg_total",
+                      "footplate_duration_avg_TMD",
+                      "footplate_duration_avg_SBD",
+                      "footplate_duration_avg_WSD",
+                      "drive_initial_avg_total",
+                      "drive_initial_avg_TMD",
+                      "drive_initial_avg_SBD",
+                      "drive_initial_avg_WSD",
+                      "drive_return_avg_total",
+                      "drive_return_avg_TMD",
+                      "drive_return_avg_SBD",
+                      "drive_return_avg_WSD",
+                      "drive_total_avg_total",
+                      "drive_total_avg_TMD",
+                      "drive_total_avg_SBD",
+                      "drive_total_avg_WSD",
+                      "total_shift_duration_avg_total",
+                      "total_shift_duration_avg_TMD",
+                      "total_shift_duration_avg_SBD",
+                      "total_shift_duration_avg_WSD")
+  
+  return(summary)
+}
+```
+
+#7# Set DAILY SUMMARY STATS Function
+
+```{r}
+daily_summary_stats_calculation <- function (dataset)
+{
+  daily_summary <- dataset %>% group_by(shift_start_date) %>% summarise(crew_pairs = n(), 
+                                                                        footplate_duration_avg = mean(total_footplate_time),
+                                                                        drive_initial_avg = mean(forward_drive_time),
+                                                                        drive_return_avg = mean(return_drive_time),
+                                                                        drive_total_avg = mean(total_drive_time),
+                                                                        total_shift_duration_avg = mean(actual_shift_length),
+                                                                        total_shift_duration_iqr = IQR(actual_shift_length),
+                                                                        count_cycle_id = n_distinct(cycle_id_start),
+                                                                        count_loco_id = n_distinct(loco_id),
+                                                                        total_footplate_days = sum(total_footplate_time)/24)
+  
+  return(daily_summary)
+}
+```
+
+#8# Set DAILY DEPOT SUMMARY STATS Function
+
+```{r}
+daily_depot_summary_stats_calculation <- function (dataset)
+{
+  daily_summary <- dataset %>% group_by(shift_start_date, depot) %>% summarise(crew_pairs = n(), 
+                                                                              footplate_duration_avg = mean(total_footplate_time),
+                                                                              drive_initial_avg = mean(forward_drive_time),
+                                                                              drive_return_avg = mean(return_drive_time),
+                                                                              drive_total_avg = mean(total_drive_time),
+                                                                              total_shift_duration_avg = mean(actual_shift_length),
+                                                                              total_shift_duration_iqr = IQR(actual_shift_length),
+                                                                              count_cycle_id = n_distinct(cycle_id_start),
+                                                                              count_loco_id = n_distinct(loco_id),
+                                                                              total_footplate_days = sum(total_footplate_time)/24)
+  
+  return(daily_summary)
+}
+
+```
+
+#9# Set parameters
+
+```{r}
+
+start_date             <- "2023-01-01"
+end_date               <- "2023-01-23"
+shift_cap              <- (11.5 * 60)
+shift_length           <- (10.86 * 60)
+max_total_drive_time   <- 5.33 * 60
+max_forward_drive_time <- 5.33 * 60
+max_return_drive_time  <- 5.33 * 60
+buffer_time            <- 0            # Additional time to be added to shift length considerations - i.e., for COVID screening processes (RAT)    
+scenario_type          <- 'Actual' # Actual, MinSectionDuration, MedianSectionDuration, AverageSectionDuration
+TMD_depot              <- 'TMD' # HXD or MFD
+fresh_crew_on_departure <- FALSE
+
+
+nodal_mode <- FALSE
+if (nodal_mode == TRUE)
+{
+  #nodes             <- as.data.frame(cbind(c("KBE", "BOG"), c("Empty", "Empty"), c(3,3), c(300, 300))) # ensure nodes have an existing location priority to ensure drive times are mapped
+  #nodes             <- as.data.frame(cbind(c("KBE", "KBE", "BOG", "BOG"), c("Empty", "Loaded", "Empty", "Loaded"), c(3,3,3,3), c(0,0,0,0))) # ensure nodes have an existing location priority to ensure drive times are mapped
+  #nodes             <- as.data.frame(cbind(c("HXM"), c("Loaded"), c(3), c(300))) # ensure nodes have an existing location priority to ensure drive times are mapped
+  nodes             <- as.data.frame(cbind(c("KRA", "RSW", "CCL", "WIL", "MBN", "FUL", "MLX", "MCS", "DIR"), c("Empty", "Empty", "Empty", "Empty", "Empty", "Empty", "Empty", "Empty", "Empty"), c(3,3,3,3,3,3,3,3,3), c(480, 480, 480, 480, 480, 480, 480, 480, 480)))
+  names(nodes)      <- c("LocationCode", "Direction", "NodePriority", "NodeShiftLengthThreshold")
+  nodes_string <- ""
+  for(row in 1:nrow(nodes))
+  {
+    nodes_string <- paste(nodes_string, nodes[row, "LocationCode"], "-", nodes[row, "Direction"], "-", nodes[row, "NodeShiftLengthThreshold"], ", ", sep = "")
+  }
+}else{
+  nodes        <- NA
+  nodes_string <- nodes}
+
+rhythmic_mode  <- FALSE
+rhythm         <- NA # String for inclusion in input_parameters exported in output file
+roster_tmd     <- seq(0, (1440 - 60), by = 120)
+roster_sbd     <- seq(0, (1440 - 60), by = 120)
+roster_wsd     <- seq(0, (1440 - 60), by = 120)
+
+#notes <- "30 min buffer time included to account for COVID screening (RAT) process at sign-on"
+notes <- "Antiene Depot removed (all sub drive times set to 1000)"
+notes <- "Moolarben-Export filtered from fleet movement input data. Drive times adjusted (set to 1000) to reflect route qualification constraints."
+#notes <- NA
+
+filter_short_shifts <- FALSE
+```
+
+#10# Running the Simulator and output workbook
+
+```{r}
+# For capturing and displaying simulation run time
+simulate_start = as.POSIXct(Sys.time(), format="%Y-%M-%D %H:%M:%S")
+print(paste('Simulation running for ', start_date, ' to ', end_date,' ... start time: ', simulate_start))
+```
+
+```{r}
+# optimize
+results <- simulate(start_date, end_date, shift_cap, shift_length, max_total_drive_time, buffer_time, scenario_type, nodes, roster_tmd, roster_sbd, roster_wsd, nodal_mode, TMD_depot, rhythmic_mode, max_forward_drive_time, max_return_drive_time, fresh_crew_on_departure)
+
+```
+
+```{r}
+# Calculate summary stats and daily summary data
+summary_stats <- summary_stats_calculation(as.data.frame(results@summarydata))
+filtered_summary_stats <- filtered_summary_stats_calculation(as.data.frame(results@summarydata))
+daily_summary_stats <- daily_summary_stats_calculation(as.data.frame(results@summarydata))
+daily_depot_summary_stats <- daily_depot_summary_stats_calculation(as.data.frame(results@summarydata))
+```
+
+```{r}
+# create excel workbook for downloading
+workbook <<- createWorkbook()
+```
+
+```{r}
+# put input parameters in a data frame for including in output workbook
+input_parameters <- as.data.frame(cbind(start_date, end_date, shift_cap/60, shift_length/60, max_forward_drive_time/60, max_return_drive_time/60, max_total_drive_time/60, buffer_time, scenario_type, nodal_mode, nodes_string, TMD_depot, rhythmic_mode, rhythm, fresh_crew_on_departure, notes))
+names(input_parameters) <- c("start_date", "end_date", "shift_cap", "shift_length","max_forward_drive_time","max_return_drive_time", "max_total_drive_time", "buffer_time_(mins)", "scenario_type", "nodal_mode", "nodes", "TMD_depot", "rhythmic_mode", "rhythm", "fresh_crew_on_departure", "notes")
+
+sheet1 <- input_parameters
+sheet2 <- as.data.frame(summary_stats)
+sheet3 <- as.data.frame(filtered_summary_stats)
+sheet4 <- as.data.frame(daily_summary_stats)
+sheet5 <- as.data.frame(daily_depot_summary_stats)
+sheet6 <- as.data.frame(results@summarydata)
+sheet7 <- as.data.frame(results@routegroups)
+sheet8 <- as.data.frame(results@warninglog)
+sheet9 <- as.data.frame(results@inputdata)
+
+addWorksheet(wb = workbook, sheetName = "Input_Parameters", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 1, x = sheet1)
+addWorksheet(wb = workbook, sheetName = "Summary_Stats", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 2, x = sheet2)
+addWorksheet(wb = workbook, sheetName = "Filtered_Summary_Stats", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 3, x = sheet3)
+addWorksheet(wb = workbook, sheetName = "Daily_Summary_Stats", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 4, x = sheet4)
+addWorksheet(wb = workbook, sheetName = "Daily_Depot_Summary_Stats", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 5, x = sheet5)
+addWorksheet(wb = workbook, sheetName = "Summary_Table", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 6, x = sheet6)
+addWorksheet(wb = workbook, sheetName = "Route_Groups", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 7, x = sheet7)
+addWorksheet(wb = workbook, sheetName = "Warning_Log", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 8, x = sheet8)
+addWorksheet(wb = workbook, sheetName = "Input_Data", gridLines = TRUE)
+writeDataTable(wb = workbook, sheet = 9, x = sheet9)
+```
+
+
+```{r}
+# Name the workbook 
+filename <- str_replace_all(paste("Simulation_", as.character(Sys.time()),".xlsx", sep=''),'[" ":-]','_')
+```
+
+
+```{r}
+# Save the workbook
+saveWorkbook(workbook, file = filename, overwrite = FALSE, returnValue = TRUE)
+```
+
+
+```{r}
+# Display the simulation complete including run time 
+simulate_end = as.POSIXct(Sys.time(), format="%Y-%M-%D %H:%M:%S")
+simulate_duration = round(as.numeric(difftime(simulate_end, simulate_start), units="mins"))
+print(paste('Simulation completed at...', simulate_end, "...in ", simulate_duration, " mins. ", nrow(sheet6), " crew pairs calculated, with ", nrow(sheet8), " warnings."))
+
+```
